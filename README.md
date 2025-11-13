@@ -318,6 +318,24 @@ This application is currently deployed on [Render.com](https://render.com), a mo
 - Access statistics at: **https://sarthak-bank-api.onrender.com/api/stats**
 - Try the interactive UI: **https://sarthak-bank-api.onrender.com/ui**
 
+### 🚧 Deployment Challenges & Solutions
+
+During the deployment journey on Render, I encountered and resolved several critical issues:
+
+| Challenge | Issue | Solution |
+|-----------|-------|----------|
+| **Python Version Incompatibility** | Render defaulted to Python 3.13, which caused SQLAlchemy 2.0 import error: `AssertionError` on `TypingOnly` | Pinned `runtime.txt` to `python-3.11.0` and set Python 3.11 in Render dashboard environment settings |
+| **Data Not Persisting** | SQLite database file (`bank_branches.db`) was lost after each deployment on Render's ephemeral filesystem | Implemented auto-load logic in FastAPI startup hook: checks if DB is empty and automatically loads 127,863 records from CSV on first app start |
+| **Start Command Syntax Error** | Markdown link artifact `[build.sh](http://...)` appeared in Start Command field instead of plain text, causing bash parse error | Removed markdown formatting from Render dashboard Start Command field; verified plain command: `bash build.sh && uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| **UI Visual Enhancement** | Original gradient-based UI lacked polish and solid aesthetic | Replaced all gradient backgrounds with solid colors (`#2563eb` primary blue); improved shadows, spacing, and hover states for modern, professional look |
+| **GitHub Push Rejected** | Remote branch had newer commits; `git push` was rejected with "fetch first" error | Used `git pull --rebase origin main` to integrate remote changes and replay local commits on top |
+
+#### Key Takeaways:
+- ✅ **Always specify Python version** for cloud deployments to avoid runtime incompatibility
+- ✅ **Use startup hooks** for data initialization on ephemeral filesystems (cloud environments)
+- ✅ **Test deployment configuration** locally before pushing to production
+- ✅ **Monitor and review dashboard settings** — they may override config files
+
 ### Using Docker
 
 Create a `Dockerfile`:
