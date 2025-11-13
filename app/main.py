@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app import crud, models, schemas
-from app.database import engine, get_db
+from app.database import engine, get_db, SessionLocal
 from app.config import settings
 
 # Try to import GraphQL (optional - REST API works without it)
@@ -54,7 +54,38 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Print helpful URLs on startup so users can quickly open the UI/docs."""
+    """Check if database is empty and load data if needed. Print helpful URLs on startup."""
+    import sys
+    from pathlib import Path
+    
+    # Check if database has data
+    db = SessionLocal()
+    try:
+        bank_count = db.query(models.Bank).count()
+        if bank_count == 0:
+            print("⚠️  Database is empty. Loading bank data from CSV...")
+            db.close()
+            
+            # Load data from scripts
+            script_path = Path(__file__).parent.parent / "scripts" / "load_data.py"
+            if script_path.exists():
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, str(script_path)],
+                    cwd=Path(__file__).parent.parent,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    print("✓ Data loaded successfully!")
+                else:
+                    print(f"⚠️  Data loading failed: {result.stderr}")
+            else:
+                print(f"⚠️  Load script not found at {script_path}")
+    finally:
+        db.close()
+    
+    # Print helpful URLs
     host = os.environ.get("HOST", "127.0.0.1")
     port = os.environ.get("PORT", "8000")
     print(f"UI available at: http://{host}:{port}/ui")
