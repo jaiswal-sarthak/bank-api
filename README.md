@@ -2,6 +2,30 @@
 
 A production-ready REST API service for querying Indian bank branches data, built with FastAPI and SQLAlchemy. This API provides endpoints to search and retrieve information about banks and their branches across India.
 
+## 🌐 Live Production Deployment
+
+The API is deployed and running on **Render.com**:
+
+- **Production API**: https://sarthak-bank-api.onrender.com
+- **REST API Docs (Swagger)**: https://sarthak-bank-api.onrender.com/docs
+- **GraphQL Playground**: https://sarthak-bank-api.onrender.com/graphql
+- **Enhanced UI**: https://sarthak-bank-api.onrender.com/ui
+- **ReDoc**: https://sarthak-bank-api.onrender.com/redoc
+- **Health Check**: https://sarthak-bank-api.onrender.com/health
+- **Statistics**: https://sarthak-bank-api.onrender.com/api/stats
+
+### Quick Test (Production)
+```bash
+# Get all banks
+curl https://sarthak-bank-api.onrender.com/api/banks
+
+# Search banks
+curl "https://sarthak-bank-api.onrender.com/api/banks?search=STATE%20BANK"
+
+# Get statistics
+curl https://sarthak-bank-api.onrender.com/api/stats
+```
+
 ## Features
 
 - 🚀 **Fast & Modern**: Built with FastAPI for high performance
@@ -241,6 +265,58 @@ Environment variables (optional):
 - `DEBUG`: Debug mode (default: False)
 
 ## Deployment
+
+### Deploying to Render (Recommended for Production)
+
+This application is currently deployed on [Render.com](https://render.com), a modern cloud platform perfect for hosting Python applications.
+
+#### Setup Steps:
+
+1. **Create a Render account** at [render.com](https://render.com)
+
+2. **Connect your GitHub repository**
+   - Go to Dashboard → New Web Service
+   - Select "Build and deploy from a Git repository"
+   - Connect your GitHub account and select the `bank-api` repository
+
+3. **Configure the Web Service**
+   - **Name**: `bank-api` (or your preferred name)
+   - **Environment**: Select `Python 3.11` (critical for SQLAlchemy compatibility)
+   - **Build Command**: `pip install -r requirements.txt && bash build.sh`
+   - **Start Command**: `bash build.sh && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Region**: Choose the closest region (e.g., Oregon, Singapore)
+
+4. **Set Environment Variables** (if needed)
+   ```
+   DATABASE_URL=sqlite:///./bank_branches.db
+   DEBUG=false
+   ```
+
+5. **Deploy**
+   - Click "Create Web Service"
+   - Render will automatically build and deploy your app
+   - The deployment includes:
+     - Automatic dependency installation
+     - Automatic data loading (127,863 bank branches)
+     - Health checks every 30 seconds
+     - Auto-scaling and zero-downtime deployments
+
+#### Important Notes:
+
+- **Data Loading**: Data is automatically loaded on first startup if the database is empty
+- **Startup Time**: First deployment may take 2-3 minutes (includes data loading)
+- **Ephemeral Filesystem**: Data persists across restarts but gets cleared on redeployment - this is intentional (auto-reload on startup)
+- **Python Version**: Must be 3.11.0 or higher (3.13 causes SQLAlchemy import errors)
+
+#### View Logs:
+- Go to your Render Dashboard → Your App → Logs
+- Look for: `"Database is empty. Loading bank data from CSV..."`
+- Followed by: `"✓ Data loaded successfully!"`
+
+#### Live Status:
+- Check the production API at: **https://sarthak-bank-api.onrender.com/health**
+- Access statistics at: **https://sarthak-bank-api.onrender.com/api/stats**
+- Try the interactive UI: **https://sarthak-bank-api.onrender.com/ui**
 
 ### Using Docker
 
