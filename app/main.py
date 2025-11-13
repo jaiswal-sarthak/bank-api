@@ -1,7 +1,11 @@
 """Main FastAPI application with REST API and GraphQL endpoints."""
 from fastapi import FastAPI, Depends, HTTPException, Query
+import os
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.responses import StreamingResponse
+import csv
+from io import StringIO
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -11,13 +15,15 @@ from app.config import settings
 
 # Try to import GraphQL (optional - REST API works without it)
 try:
-    from strawberry.fastapi import GraphQLRouter
+    import importlib
+    strawberry_fastapi = importlib.import_module("strawberry.fastapi")
+    GraphQLRouter = getattr(strawberry_fastapi, "GraphQLRouter")
     from app.graphql_schema import schema
     GRAPHQL_AVAILABLE = True
-except ImportError:
+except Exception:
     GRAPHQL_AVAILABLE = False
     print("Warning: GraphQL not available. REST API will work without GraphQL.")
-    print("To enable GraphQL, install Rust and run: pip install strawberry-graphql[fastapi]")
+    print("To enable GraphQL, install Rust and run: pip install 'strawberry-graphql[fastapi]'")
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -44,6 +50,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Print helpful URLs on startup so users can quickly open the UI/docs."""
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = os.environ.get("PORT", "8000")
+    print(f"UI available at: http://{host}:{port}/ui")
+    print(f"REST docs: http://{host}:{port}/docs    ReDoc: http://{host}:{port}/redoc")
+    if GRAPHQL_AVAILABLE:
+        print(f"GraphQL playground available at: http://{host}:{port}/graphql")
+    else:
+        print("GraphQL not enabled. Install 'strawberry-graphql[fastapi]' to enable GraphQL playground.")
 
 
 @app.get("/", tags=["Root"])
@@ -130,7 +149,7 @@ async def get_bank(
 async def get_bank_branches(
     bank_id: int,
     page: int = Query(1, ge=1, description="Page number (starting from 1)"),
-    page_size: int = Query(50, ge=1, le=100, description="Number of items per page"),
+    page_size: int = Query(50, ge=0, le=1000, description="Number of items per page (0 = all, max 1000)"),
     city: Optional[str] = Query(None, description="Filter by city"),
     state: Optional[str] = Query(None, description="Filter by state"),
     db: Session = Depends(get_db)
@@ -156,11 +175,18 @@ async def get_bank_branches(
     if bank is None:
         raise HTTPException(status_code=404, detail="Bank not found")
     
-    skip = (page - 1) * page_size
+    # interpret page_size == 0 as no limit (return all matching)
+    if page_size == 0:
+        skip = 0
+        limit = None
+    else:
+        skip = (page - 1) * page_size
+        limit = page_size
+
     branches = crud.get_branches(
-        db, 
-        skip=skip, 
-        limit=page_size, 
+        db,
+        skip=skip,
+        limit=limit,
         bank_id=bank_id,
         city=city,
         state=state
@@ -171,7 +197,8 @@ async def get_bank_branches(
 @app.get("/api/branches", response_model=List[schemas.BranchWithBank], tags=["Branches"])
 async def list_branches(
     page: int = Query(1, ge=1, description="Page number (starting from 1)"),
-    page_size: int = Query(50, ge=1, le=100, description="Number of items per page"),
+    page_size: int = Query(50, ge=0, le=1000, description="Number of items per page (0 = all, max 1000)"),
+    bank_id: Optional[int] = Query(None, description="Filter by bank ID"),
     bank_name: Optional[str] = Query(None, description="Filter by bank name"),
     city: Optional[str] = Query(None, description="Filter by city"),
     district: Optional[str] = Query(None, description="Filter by district"),
@@ -199,11 +226,19 @@ async def list_branches(
         - Filter by bank and city: `/api/branches?bank_name=STATE BANK OF INDIA&city=MUMBAI`
         - Search branches: `/api/branches?search=connaught`
     """
-    skip = (page - 1) * page_size
+    # If page_size is 0, return all matching results (ignore page)
+    if page_size == 0:
+        skip = 0
+        limit = None
+    else:
+        skip = (page - 1) * page_size
+        limit = page_size
+
     branches = crud.get_branches(
         db,
         skip=skip,
-        limit=page_size,
+        limit=limit,
+        bank_id=bank_id,
         bank_name=bank_name,
         city=city,
         district=district,
@@ -211,6 +246,97 @@ async def list_branches(
         search=search
     )
     return branches
+
+
+@app.get("/api/branches/count", tags=["Branches"])
+async def branches_count(
+    bank_id: Optional[int] = Query(None, description="Filter by bank ID"),
+    bank_name: Optional[str] = Query(None, description="Filter by bank name"),
+    city: Optional[str] = Query(None, description="Filter by city"),
+    district: Optional[str] = Query(None, description="Filter by district"),
+    state: Optional[str] = Query(None, description="Filter by state"),
+    search: Optional[str] = Query(None, description="Search in branch name, address, or IFSC"),
+    db: Session = Depends(get_db)
+):
+    """Return count of branches matching filters."""
+    try:
+        cnt = crud.get_branches_count(
+            db,
+            bank_id=bank_id,
+            bank_name=bank_name,
+            city=city,
+            district=district,
+            state=state,
+            search=search
+        )
+        return {"count": int(cnt or 0)}
+    except Exception as e:
+        # Return a friendly 400 with message if something's wrong with parameters
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/branches/export", tags=["Branches"])
+def export_branches_csv(
+    bank_id: Optional[int] = Query(None, description="Filter by bank ID"),
+    bank_name: Optional[str] = Query(None, description="Filter by bank name"),
+    city: Optional[str] = Query(None, description="Filter by city"),
+    district: Optional[str] = Query(None, description="Filter by district"),
+    state: Optional[str] = Query(None, description="Filter by state"),
+    search: Optional[str] = Query(None, description="Search in branch name, address, or IFSC"),
+    db: Session = Depends(get_db)
+):
+    """Stream CSV export of branches matching filters."""
+
+    def row_generator():
+        # Header
+        header = ['ifsc','bank_id','bank_name','branch','address','city','district','state']
+        sio = StringIO()
+        writer = csv.writer(sio)
+        writer.writerow(header)
+        yield sio.getvalue()
+        sio.seek(0)
+        sio.truncate(0)
+
+        # Fetch all matching rows in batches to avoid loading entire table
+        batch_size = 1000
+        offset = 0
+        while True:
+            rows = crud.get_branches(
+                db,
+                skip=offset,
+                limit=batch_size,
+                bank_id=bank_id,
+                bank_name=bank_name,
+                city=city,
+                district=district,
+                state=state,
+                search=search
+            )
+            if not rows:
+                break
+            for r in rows:
+                # r.bank may be lazy-loaded; ensure name available
+                bankname = getattr(r.bank, 'name', '') if r.bank is not None else ''
+                writer.writerow([
+                    r.ifsc,
+                    r.bank_id,
+                    bankname,
+                    r.branch or '',
+                    r.address or '',
+                    r.city or '',
+                    r.district or '',
+                    r.state or ''
+                ])
+                yield sio.getvalue()
+                sio.seek(0)
+                sio.truncate(0)
+
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+
+    filename = "branches_export.csv"
+    return StreamingResponse(row_generator(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
 @app.get("/api/branches/{ifsc}", response_model=schemas.BranchWithBank, tags=["Branches"])
@@ -386,6 +512,24 @@ async def ui_page():
                 transform: translateY(-2px);
                 box-shadow: 0 5px 15px rgba(0,0,0,0.2);
             }
+            .back-btn {
+                padding: 10px 16px;
+                background: #667eea;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-weight: 600;
+                font-size: 0.95em;
+            }
+            .back-btn:hover {
+                background: #5568d3;
+            }
+            .stats-header {
+                padding: 15px 0;
+                margin-bottom: 20px;
+                border-bottom: 1px solid #ddd;
+            }
             .results {
                 margin-top: 30px;
             }
@@ -434,6 +578,7 @@ async def ui_page():
                 padding: 20px;
                 border-radius: 10px;
                 text-align: center;
+                cursor: pointer;
             }
             .stat-card h3 {
                 font-size: 2em;
@@ -503,10 +648,20 @@ async def ui_page():
                     <h2>Search Branches</h2>
                     <input type="text" class="search-box" id="searchInput" placeholder="Search by branch name, IFSC, or address...">
                     <div class="filters">
+                        <input type="number" class="filter-input" id="bankIdFilter" placeholder="Bank ID (numeric)">
                         <input type="text" class="filter-input" id="bankFilter" placeholder="Bank Name">
                         <input type="text" class="filter-input" id="cityFilter" placeholder="City">
                         <input type="text" class="filter-input" id="stateFilter" placeholder="State">
+                        <label style="display:flex; align-items:center; gap:8px;">
+                            <input type="checkbox" id="showAllCheckbox"> <span style="font-size:0.9em;">Show all results</span>
+                        </label>
                         <button class="btn" onclick="searchBranches()">Search</button>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:20px; margin-top:12px;">
+                        <div id="resultInfo" style="color:#333; font-weight:600;">&nbsp;</div>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn" id="downloadCsvBtn" onclick="downloadCSV()" disabled>Download CSV</button>
+                        </div>
                     </div>
                     <div id="restResults" class="results"></div>
                     <div class="pagination" id="restPagination"></div>
@@ -546,7 +701,8 @@ async def ui_page():
         </div>
         <script>
             let currentPage = 1;
-            const pageSize = 20;
+            const defaultPageSize = 20;
+            let lastResults = [];
             
             function switchTab(tabName) {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -561,12 +717,16 @@ async def ui_page():
             
             async function searchBranches() {
                 const search = document.getElementById('searchInput').value;
+                const bankId = document.getElementById('bankIdFilter').value;
                 const bank = document.getElementById('bankFilter').value;
                 const city = document.getElementById('cityFilter').value;
                 const state = document.getElementById('stateFilter').value;
-                
+                const showAll = document.getElementById('showAllCheckbox').checked;
+                // If showAll is checked, request page_size=0 which our API interprets as "all"
+                const pageSize = showAll ? 0 : defaultPageSize;
                 let url = `/api/branches?page=${currentPage}&page_size=${pageSize}`;
                 if (search) url += `&search=${encodeURIComponent(search)}`;
+                if (bankId) url += `&bank_id=${encodeURIComponent(bankId)}`;
                 if (bank) url += `&bank_name=${encodeURIComponent(bank)}`;
                 if (city) url += `&city=${encodeURIComponent(city)}`;
                 if (state) url += `&state=${encodeURIComponent(state)}`;
@@ -575,8 +735,29 @@ async def ui_page():
                 
                 try {
                     const response = await fetch(url);
-                    const data = await response.json();
-                    displayResults(data);
+                        const data = await response.json();
+                        lastResults = data || [];
+                        // update resultInfo via count endpoint when possible
+                        try {
+                            const params = new URLSearchParams();
+                            if (bankId) params.append('bank_id', bankId);
+                            if (bank) params.append('bank_name', bank);
+                            if (city) params.append('city', city);
+                            if (state) params.append('state', state);
+                            if (search) params.append('search', search);
+                            const countResp = await fetch('/api/branches/count?' + params.toString());
+                            const countData = await countResp.json();
+                            const total = (countData && typeof countData.count === 'number') ? countData.count : ((lastResults && lastResults.length) || 0);
+                            const resultInfoEl = document.getElementById('resultInfo');
+                            if (resultInfoEl) resultInfoEl.innerText = `${total} branches found`;
+                        } catch (e) {
+                            const total = (lastResults && lastResults.length) || 0;
+                            const resultInfoEl = document.getElementById('resultInfo');
+                            if (resultInfoEl) resultInfoEl.innerText = `${total} results`;
+                        }
+                        displayResults(data);
+                        const downloadBtn = document.getElementById('downloadCsvBtn');
+                        if (downloadBtn) downloadBtn.disabled = !(lastResults && lastResults.length > 0);
                 } catch (error) {
                     document.getElementById('restResults').innerHTML = `<div class="error">Error: ${error.message}</div>`;
                 }
@@ -599,6 +780,148 @@ async def ui_page():
                         <p><strong>State:</strong> ${branch.state || 'N/A'}</p>
                     </div>
                 `).join('');
+            }
+
+            // Download CSV via server exporter using current filters
+            function downloadCSV() {
+                const search = document.getElementById('searchInput').value;
+                const bankId = document.getElementById('bankIdFilter').value;
+                const bank = document.getElementById('bankFilter').value;
+                const city = document.getElementById('cityFilter').value;
+                const state = document.getElementById('stateFilter').value;
+                const params = new URLSearchParams();
+                if (bankId) params.append('bank_id', bankId);
+                if (bank) params.append('bank_name', bank);
+                if (city) params.append('city', city);
+                if (state) params.append('state', state);
+                if (search) params.append('search', search);
+                // open export URL - browser will download
+                const url = '/api/branches/export?' + params.toString();
+                window.location = url;
+            }
+
+            let statsPageData = null;  // Track pagination state
+
+            function reloadStats() {
+                statsPageData = null;
+                loadStats();
+            }
+
+            // Show all banks (paginated client-side to collect all)
+            async function showBanks() {
+                // switch to stats tab and render into statsContainer
+                try {
+                    switchTab('stats');
+                } catch (e) {}
+                const container = document.getElementById('statsContainer');
+                container.innerHTML = '<div class="stats-header"><button class="back-btn" onclick="reloadStats()">← Back</button></div><div class="loading">Loading banks...</div>';
+                let page = 1;
+                const page_size = 100;
+                let all = [];
+                while (true) {
+                    const resp = await fetch(`/api/banks?page=${page}&page_size=${page_size}`);
+                    const data = await resp.json();
+                    if (!data || data.length === 0) break;
+                    all = all.concat(data);
+                    if (data.length < page_size) break;
+                    page += 1;
+                }
+                lastResults = all;
+                const downloadBtn = document.getElementById('downloadCsvBtn');
+                if (downloadBtn) downloadBtn.disabled = !(lastResults && lastResults.length > 0);
+                container.innerHTML = `<div class="stats-header"><button class="back-btn" onclick="reloadStats()">← Back</button></div><div class="results">${all.map(b => `<div class="result-item"><h3>${b.name}</h3><p>ID: ${b.id}</p></div>`).join('')}</div>`;
+            }
+
+            // Show all branches - paginated lazy-loading for performance
+            async function showBranches() {
+                try {
+                    switchTab('stats');
+                } catch (e) {}
+                
+                const container = document.getElementById('statsContainer');
+                container.innerHTML = '<div class="stats-header"><button class="back-btn" onclick="reloadStats()">← Back</button></div><div class="loading">Loading branches...</div>';
+                
+                try {
+                    // get count with filters currently set in the UI
+                    const params = new URLSearchParams();
+                    const search = document.getElementById('searchInput').value;
+                    const bankId = document.getElementById('bankIdFilter').value;
+                    const bank = document.getElementById('bankFilter').value;
+                    const city = document.getElementById('cityFilter').value;
+                    const state = document.getElementById('stateFilter').value;
+                    if (bankId) params.append('bank_id', bankId);
+                    if (bank) params.append('bank_name', bank);
+                    if (city) params.append('city', city);
+                    if (state) params.append('state', state);
+                    if (search) params.append('search', search);
+                    
+                    const respCount = await fetch('/api/branches/count?' + params.toString());
+                    const countData = await respCount.json();
+                    const total = (countData && typeof countData.count === 'number') ? countData.count : 0;
+                    
+                    if (total > 5000) {
+                        if (!confirm(`There are ${total} branches. This may take a moment. Proceed?`)) {
+                            reloadStats();
+                            return;
+                        }
+                    }
+
+                    // Lazy-load branches using pagination 
+                    statsPageData = {
+                        params: params,
+                        currentPage: 1,
+                        pageSize: 500,  // larger page size for faster loading
+                        total: total,
+                        loaded: 0,
+                        branches: []
+                    };
+                    
+                    container.innerHTML = `<div class="stats-header"><button class="back-btn" onclick="reloadStats()">← Back</button></div><div class="results" id="branchList" style=""></div><div id="loadMoreContainer" style="text-align:center; padding:20px;"><button class="btn" onclick="loadMoreBranches()">Load More</button></div>`;
+                    
+                    await loadMoreBranches();
+                } catch (e) {
+                    container.innerHTML = `<div class="stats-header"><button class="back-btn" onclick="reloadStats()">← Back</button></div><div class="error">Error: ${(e.message || e)}</div>`;
+                }
+            }
+
+            async function loadMoreBranches() {
+                if (!statsPageData) return;
+                
+                const container = document.getElementById('branchList');
+                const params = new URLSearchParams(statsPageData.params);
+                params.append('page', statsPageData.currentPage);
+                params.append('page_size', statsPageData.pageSize);
+                
+                try {
+                    const resp = await fetch('/api/branches?' + params.toString());
+                    const data = await resp.json();
+                    
+                    if (!data || data.length === 0) {
+                        document.getElementById('loadMoreContainer').innerHTML = `<p style="color:#666;">Loaded all ${statsPageData.loaded} branches ✓</p>`;
+                        return;
+                    }
+                    
+                    statsPageData.branches = statsPageData.branches.concat(data);
+                    statsPageData.loaded += data.length;
+                    statsPageData.currentPage += 1;
+                    
+                    // Append new results to existing list
+                    const newHtml = data.map(b => `<div class="result-item" style="margin-bottom:10px;"><h3>${b.branch || b.ifsc}</h3><p>${(b.bank && b.bank.name) || ''} — ${b.city || ''}, ${b.state || ''}</p></div>`).join('');
+                    container.innerHTML += newHtml;
+                    
+                    lastResults = statsPageData.branches;
+                    const downloadBtn = document.getElementById('downloadCsvBtn');
+                    if (downloadBtn) downloadBtn.disabled = !(lastResults && lastResults.length > 0);
+                    
+                    // Update load more button
+                    if (statsPageData.loaded >= statsPageData.total) {
+                        document.getElementById('loadMoreContainer').innerHTML = `<p style="color:#666;">Loaded all ${statsPageData.total} branches ✓</p>`;
+                    } else {
+                        document.getElementById('loadMoreContainer').innerHTML = `<button class="btn" onclick="loadMoreBranches()">Load More (${statsPageData.loaded}/${statsPageData.total})</button>`;
+                    }
+                } catch (e) {
+                    document.getElementById('loadMoreContainer').innerHTML = `<div class="error">Error loading more: ${e.message}</div>`;
+                }
             }
             
             async function executeGraphQL() {
@@ -625,11 +948,11 @@ async def ui_page():
                     const response = await fetch('/api/stats');
                     const data = await response.json();
                     document.getElementById('statsContainer').innerHTML = `
-                        <div class="stat-card">
+                        <div class="stat-card" onclick="showBanks()">
                             <h3>${data.total_banks}</h3>
                             <p>Total Banks</p>
                         </div>
-                        <div class="stat-card">
+                        <div class="stat-card" onclick="showBranches()">
                             <h3>${data.total_branches}</h3>
                             <p>Total Branches</p>
                         </div>
@@ -642,10 +965,15 @@ async def ui_page():
             // Load initial data
             searchBranches();
             
-            // Allow Enter key to search
-            document.getElementById('searchInput').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') {
-                    searchBranches();
+            // Allow Enter key to search from main search input or bank id input
+            ['searchInput','bankIdFilter','bankFilter','cityFilter','stateFilter'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('keypress', function(e) {
+                        if (e.key === 'Enter') {
+                            searchBranches();
+                        }
+                    });
                 }
             });
         </script>

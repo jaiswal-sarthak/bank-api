@@ -19,12 +19,15 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.DS_Store
 
 # Virtual Environment
 venv/
 env/
 ENV/
 .venv
+env.bak/
+venv.bak/
 
 # IDE
 .vscode/
@@ -32,15 +35,19 @@ ENV/
 *.swp
 *.swo
 *~
+.project
+.pydevproject
 
 # Environment Variables
 .env
 .env.local
+.env*.local
 
 # Database files
 *.db
 *.sqlite
 *.sqlite3
+test_*.db
 
 # But keep the data folder with CSV
 !data/
@@ -48,6 +55,17 @@ ENV/
 # Testing
 .pytest_cache/
 .coverage
+coverage.xml
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
 htmlcov/
 .tox/
 

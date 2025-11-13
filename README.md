@@ -30,7 +30,7 @@ Data is included from the official [Indian Banks repository](https://github.com/
 - **Framework**: FastAPI 0.104+
 - **GraphQL**: Strawberry GraphQL 0.200+
 - **ORM**: SQLAlchemy 2.0+
-- **Database**: SQLite (default) / PostgreSQL (production-ready)
+- **Database**: SQLite
 - **Validation**: Pydantic 2.0+
 - **Testing**: Pytest 7.4+
 - **Server**: Uvicorn 0.24+
@@ -47,7 +47,7 @@ Data is included from the official [Indian Banks repository](https://github.com/
 
 1. **Clone the repository**
    ```bash
-   git clone <your-repository-url>
+   git clone https://github.com/jaiswal-sarthak/bank-api.git
    cd bank_api
    ```
 
